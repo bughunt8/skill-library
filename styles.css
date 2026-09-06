@@ -327,8 +327,16 @@ a { color: inherit; text-decoration: none; }
   :root { --t-caption: 0.76rem; }
   .rail { display: none; }
   .chapter__stage { height: auto; min-height: 0; padding: 56px 0 40px; }
-  .strip__mask { overflow: visible; margin-right: 0; }
+  /* min-width: 0 is load-bearing, not defensive. The mask is a grid item, and a
+     grid item's default min-width:auto resolves to its max-content width unless
+     it establishes a scroll container. Desktop gets away with it because the mask
+     is overflow:hidden there, which forces the minimum to 0. Here overflow is
+     visible, so the mask stretched to the full width of all its cards (32,249px
+     in the first category), the strip filled it exactly, and there was nothing
+     left to scroll: the carousel could not be swiped at all. */
+  .strip__mask { overflow: visible; margin-right: 0; min-width: 0; }
   .strip {
+    min-width: 0;
     padding-right: clamp(24px, 5vw, 64px);
     overflow-x: auto; scroll-snap-type: x mandatory;
     -webkit-overflow-scrolling: touch;
