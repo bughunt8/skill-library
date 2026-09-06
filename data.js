@@ -1,1 +1,1 @@
-window.SKILLDATA={"total":482,"categories":24};
+window.SKILLDATA={"total":431,"categories":22};

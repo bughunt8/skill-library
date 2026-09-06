@@ -159,21 +159,62 @@ def collect(checkouts: dict) -> list:
     return rows
 
 
-def fetch(refresh: bool) -> dict:
-    """Return {source id: checkout path}. Uses a sibling clone when present."""
-    checkouts, tmp = {}, None
+def resolve_tip(url: str) -> str:
+    """The commit the upstream default branch currently points at."""
+    out = subprocess.run(
+        ["git", "ls-remote", url + ".git", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    if not out:
+        fail(f"could not resolve HEAD for {url}")
+    return out[0]
+
+
+def repin() -> None:
+    """Move every pin in sources.json to the current upstream tip."""
+    cfg = json.loads(SOURCES.read_text(encoding="utf-8"))
+    for src in cfg["sources"]:
+        tip = resolve_tip(src["url"])
+        if src.get("ref") != tip:
+            print(f"  {src['repo']}: {src.get('ref', '<unpinned>')[:12]} -> {tip[:12]}")
+        src["ref"] = tip
+    SOURCES.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+
+
+def fetch() -> dict:
+    """Clone every source at its pinned commit. Returns {source id: path}.
+
+    Always clones rather than reusing a sibling working copy. A sibling checkout
+    is whatever the last person left it at, and building from that is how the
+    committed page came to disagree with the sources: CI cloned upstream HEAD,
+    a laptop used a stale local clone, and the two produced different pages.
+    Cloning at the pin makes the build deterministic everywhere.
+    """
+    checkouts = {}
+    tmp = Path(tempfile.mkdtemp(prefix="skill-src-"))
     for src in load_sources():
-        local = ROOT.parent / src["id"]
-        if local.is_dir() and not refresh:
-            checkouts[src["id"]] = local
-            continue
-        if tmp is None:
-            tmp = Path(tempfile.mkdtemp(prefix="skill-src-"))
+        ref = src.get("ref")
+        if not ref:
+            fail(
+                f"[{src['id']}] has no pinned 'ref' in sources.json. "
+                f"Run: python3 build.py --refresh --write"
+            )
         dest = tmp / src["id"]
         subprocess.run(
-            ["git", "clone", "--quiet", "--depth", "1", src["url"] + ".git", str(dest)],
+            ["git", "clone", "--quiet", "--filter=blob:none", "--no-checkout",
+             src["url"] + ".git", str(dest)],
             check=True,
         )
+        r = subprocess.run(
+            ["git", "-C", str(dest), "checkout", "--quiet", ref],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            fail(
+                f"[{src['id']}] pinned commit {ref[:12]} is not reachable in "
+                f"{src['url']} ({r.stderr.strip()}). It may have been force-pushed; "
+                f"re-pin with: python3 build.py --refresh --write"
+            )
         checkouts[src["id"]] = dest
     return checkouts
 
@@ -297,6 +338,21 @@ def render(rows: list) -> "tuple[dict, str]":
     return {"main": "\n".join(out), "credits": "\n".join(cred)}, data
 
 
+# Every phrasing in the hand-written part of the page that states a count. Each
+# must be regenerated on build, because a number nobody recalculates is a claim
+# nobody checked.
+CLAIMS = [
+    (re.compile(r"\b(\d+) agent skills across (\d+) categories"), "{t} agent skills across {c} categories"),
+    (re.compile(r"\b(\d+) AI agent skills across (\d+) categories"), "{t} AI agent skills across {c} categories"),
+    (re.compile(r"\btravel through (\d+) categories"), "travel through {c} categories"),
+    (re.compile(r'(<div class="hud__count" id="hudcount">)0*\d+ / (\d+)'), None),
+]
+
+# Any surviving number attached to these nouns outside the generated region is a
+# claim the build does not own, and is therefore drift waiting to happen.
+AUDIT = re.compile(r"\b(\d+)\s+(?:AI\s+)?(?:agent\s+)?(?:skills|categories)\b")
+
+
 def splice(page: str, blocks: dict, total: int, cats: int) -> str:
     for key, (begin, end) in MARKERS.items():
         if page.count(begin) != 1 or page.count(end) != 1:
@@ -307,14 +363,33 @@ def splice(page: str, blocks: dict, total: int, cats: int) -> str:
         head = page.split(begin)[0]
         tail = page.split(end, 1)[1]
         page = head + begin + "\n" + blocks[key] + "\n    " + end + tail
-    # the counts in the hand-written copy are claims about the data, so keep them true
-    page = re.sub(
-        r"\b\d+ agent skills across \d+ categories",
-        f"{total} agent skills across {cats} categories",
-        page,
-    )
-    page = re.sub(r"\b\d+ / \d+</div>", f"000 / {total}</div>", page)
+
+    for pattern, template in CLAIMS:
+        if template is None:
+            page = pattern.sub(rf"\g<1>000 / {total}", page)
+        else:
+            page = pattern.sub(template.format(t=total, c=cats), page)
     return page
+
+
+def audit_claims(page: str, total: int, cats: int) -> list:
+    """Find count claims in the hand-written region that the build does not own."""
+    begin, end = MARKERS["main"]
+    cbegin, cend = MARKERS["credits"]
+    # Blank out both generated regions; their numbers are generated by definition.
+    stripped = re.sub(
+        re.escape(begin) + r".*?" + re.escape(end), "", page, flags=re.S
+    )
+    stripped = re.sub(
+        re.escape(cbegin) + r".*?" + re.escape(cend), "", stripped, flags=re.S
+    )
+    bad = []
+    for m in AUDIT.finditer(stripped):
+        n = int(m.group(1))
+        if n not in (total, cats):
+            line = stripped[: m.start()].count("\n") + 1
+            bad.append(f"line {line}: \"{m.group(0)}\" (data says {total} skills, {cats} categories)")
+    return bad
 
 
 def main(argv: list) -> int:
@@ -322,13 +397,23 @@ def main(argv: list) -> int:
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--write", action="store_true")
-    ap.add_argument("--refresh", action="store_true", help="clone the upstreams fresh")
+    ap.add_argument(
+        "--refresh",
+        action="store_true",
+        help="move each pin in sources.json to the current upstream tip first",
+    )
     args = ap.parse_args(argv)
 
     if not shutil.which("git"):
         fail("git is required")
 
-    rows = collect(fetch(args.refresh))
+    if args.refresh:
+        if args.check:
+            fail("--refresh changes the pins, so it cannot be combined with --check")
+        print("re-pinning sources to their current upstream tips:")
+        repin()
+
+    rows = collect(fetch())
     if not rows:
         fail("no skills collected; check sources.json", 1)
     blocks, data = render(rows)
@@ -336,6 +421,17 @@ def main(argv: list) -> int:
 
     current = INDEX.read_text(encoding="utf-8")
     updated = splice(current, blocks, len(rows), len(counts))
+
+    drift = audit_claims(updated, len(rows), len(counts))
+    if drift:
+        print(
+            "error: index.html states counts the build does not own:\n  "
+            + "\n  ".join(drift)
+            + "\n\nAdd the phrasing to CLAIMS in build.py so it is regenerated, "
+            "rather than editing the number by hand.",
+            file=sys.stderr,
+        )
+        return 1
 
     if args.check:
         stale = []
