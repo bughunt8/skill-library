@@ -84,6 +84,9 @@
   gsap.registerPlugin(ScrollTrigger);
   document.documentElement.classList.add("is-enhanced");
 
+  // Progress starts at nothing: no category has been travelled yet.
+  setHud(0, "");
+
   // Smooth scrolling, driven from GSAP's ticker so there is exactly one rAF
   // loop on the page rather than Lenis and GSAP each running their own.
   var lenis = null;
@@ -136,10 +139,11 @@
         ease: "none",
         duration: 1,
         onUpdate: function () {
-          var n = Math.round(counter.v);
-          if (heroCount) heroCount.textContent = n;
-          setHud(n, "");
-          if (bar) gsap.set(bar, { scaleX: 0 });
+          // Only the hero's own number. Writing the total into the HUD here made
+          // the HUD mean "size of the library" during the hero and "skills
+          // passed so far" during the chapters, so it counted up to 431 and then
+          // dropped back to 109. The HUD means progress, and nothing else.
+          if (heroCount) heroCount.textContent = Math.round(counter.v);
         }
       }, 0)
       .fromTo(

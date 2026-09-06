@@ -13,7 +13,9 @@
   --line-soft: #23283366;
   --text: #eef1f6;
   --text-dim: #9aa3b2;
-  --text-faint: #6b7480;
+  /* 5.10:1 on --bg-elev, the worse of the two backgrounds it sits on.
+     The previous #6b7480 was 3.87:1 and failed WCAG AA. */
+  --text-faint: #7d8798;
   --accent: #5c8cff;
   --accent-soft: #5c8cff1a;
   --accent-line: #5c8cff40;
@@ -335,7 +337,10 @@ a { color: inherit; text-decoration: none; }
   .strip::-webkit-scrollbar { height: 3px; }
   .strip::-webkit-scrollbar-thumb { background: var(--line); }
   .card { scroll-snap-align: start; flex-basis: 78vw; }
-  .chapter__ghost { font-size: clamp(4rem, 22vw, 8rem); top: auto; bottom: -2%; opacity: 0.6; }
+  /* Decorative depth for a pinned frame. Pinning is off at this width, and
+     as nowrap display type with no clipping ancestor it overflowed the
+     document by 488px at 320px. */
+  .chapter__ghost { display: none; }
   .hud__count { font-size: var(--t-caption); }
 }
 

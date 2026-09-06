@@ -77,9 +77,11 @@ test.describe("prerendered content", () => {
     }
     expect(running).toBe(data.total);
 
-    // The headline claim must match too.
-    const h1 = (await page.locator(".hero h1").innerText()).replace(/\s+/g, " ");
-    expect(h1).toContain(String(data.total));
+    // The headline claim must match too. Assert this on the shipped HTML rather
+    // than the live DOM: with motion on, the hero number animates up from 0, so
+    // reading it at scroll 0 legitimately returns "0".
+    const h1 = (html.match(/<h1>([\s\S]*?)<\/h1>/) || [])[1] || "";
+    expect(h1.replace(/<[^>]+>/g, " ")).toContain(String(data.total));
     expect(h1).toContain(String(data.categories));
   });
 

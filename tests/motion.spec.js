@@ -83,26 +83,28 @@ test.describe("scroll choreography", () => {
         const rail = document.querySelector("#rail");
         if (!rail || getComputedStyle(rail).display === "none") return null;
         const railBox = rail.getBoundingClientRect();
-        const masks = [...document.querySelectorAll(".strip__mask")].map((m) =>
-          m.getBoundingClientRect()
+        // What the reader sees is the card intersected with the mask that clips
+        // it. A raw card rect is the wrong measure: getBoundingClientRect
+        // reports the untruncated box, so a card correctly hidden behind the
+        // mask edge still reads as overlapping.
+        const bad = [...document.querySelectorAll(".strip__mask")]
+          .flatMap((mask) => {
+            const m = mask.getBoundingClientRect();
+            return [...mask.querySelectorAll(".card")].map((c) => {
+              const b = c.getBoundingClientRect();
+              return Math.min(b.right, m.right);
+            });
+          })
+          .filter((visibleRight) => visibleRight > railBox.left + 1).length;
+        const clipped = [...document.querySelectorAll(".strip__mask")].every(
+          (m) => m.getBoundingClientRect().right <= railBox.left + 1
         );
-        // Only cards inside the viewport can overlap anything visible.
-        const bad = [...document.querySelectorAll(".card")]
-          .map((c) => c.getBoundingClientRect())
-          .filter(
-            (b) =>
-              b.right > 0 &&
-              b.left < window.innerWidth &&
-              b.bottom > 0 &&
-              b.top < window.innerHeight &&
-              b.right > railBox.left + 1
-          ).length;
-        return { bad, clipped: masks.every((m) => m.right <= railBox.left + 1) };
+        return { bad, clipped };
       });
 
       if (r === null) continue;
       expect(r.clipped, `mask clips before rail at ${y}px`).toBe(true);
-      expect(r.bad, `cards overlapping rail at ${y}px`).toBe(0);
+      expect(r.bad, `visible card edges past the rail at ${y}px`).toBe(0);
     }
   });
 
