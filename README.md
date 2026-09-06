@@ -36,6 +36,12 @@ python3 build.py --refresh --write   # re-clone the upstreams first, then regene
 
 `build.py` uses the standard library only, so CI needs nothing installed to run it.
 
+Each source in `sources.json` is **pinned to a commit**, and the build always
+clones at that pin. Without pinning the build is not reproducible: a runner
+clones upstream `HEAD` while a laptop reuses whatever a local checkout was left
+at, and the same repository commit produces two different pages. `--refresh` is
+the only thing that moves a pin, which is what the fortnightly workflow does.
+
 ### Why the page is prerendered
 
 The first version of this page built all of its cards in JavaScript. That served
@@ -52,7 +58,8 @@ styles.css      design tokens and layout; one dark theme, one accent
 app.js          motion layer only, a progressive enhancement over the HTML
 data.js         generated totals, used by the counter
 build.py        reads the sources, prerenders the page, verifies it in CI
-sources.json    the repositories to index; adding one here is the only change needed
+sources.json    the repositories to index, each pinned to a commit; adding one
+                here is the only change needed
 _headers        Cloudflare Pages response headers, including CSP
 tests/          Playwright suite: content, motion, resilience, accessibility
 scripts/        secret scanner and post-deploy smoke test
@@ -106,13 +113,20 @@ by hand.
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| `ci.yml` | every push and PR | secret scan, gitleaks, build reproducibility, HTML validity, full browser suite. Exposes one required check, `all gates passed`. |
-| `deploy-staging.yml` | push to `main` | waits for CI, rebuilds, publishes to GitHub Pages, then smoke-tests the live URL |
-| `deploy-production.yml` | `v*` tag or manual | waits for CI, rebuilds, publishes to Cloudflare Pages, verifies DNS, smoke-tests the live site and checks security headers |
+| `validate.yml` | called by the two below | secret scan, gitleaks, build reproducibility, HTML validity, and the full browser suite. Defined once so production revalidates the exact commit it ships. |
+| `ci.yml` | every push and PR | calls `validate.yml`, then on `main` rebuilds and publishes staging to GitHub Pages and smoke-tests the live URL. Exposes one required check, `all gates passed`. |
+| `deploy-production.yml` | `v*` tag or manual | calls `validate.yml`, rebuilds, publishes to Cloudflare Pages, verifies DNS, smoke-tests the live site and checks security headers |
 | `dns.yml` | manual only | plans or applies the one Route 53 CNAME for `skills.ronald.ng` |
 | `refresh-sources.yml` | 1st and 15th | rebuilds from the upstream repositories and opens a PR when anything changed |
 
-CI uses no secrets at all, so it runs in full on fork pull requests.
+`validate.yml` uses no secrets at all, so it runs in full on fork pull requests.
+Deploy credentials are read only by the deploy jobs, from Actions secrets, by
+reference.
+
+Both deploy paths call the same validation rather than polling for another
+workflow's result. Polling across a workflow boundary for a check that has not
+been created yet fails immediately, which is exactly what the first staging
+deploy did.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for the hosting layout, the secrets the deploy
 workflows expect, and how DNS is arranged.

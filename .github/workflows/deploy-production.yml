@@ -27,18 +27,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Production revalidates the exact commit it is about to ship. It does not
+  # trust that an earlier CI run passed, and it does not poll across a workflow
+  # boundary for a check that may not exist yet.
+  validate:
+    name: validate
+    uses: ./.github/workflows/validate.yml
+
   preflight:
     name: preflight
     runs-on: ubuntu-latest
-    outputs:
-      have_cloudflare: ${{ steps.check.outputs.have_cloudflare }}
+    needs: validate
     steps:
       - uses: actions/checkout@v4
 
       # Fail loudly and early on a missing secret. A deploy job that silently
       # skips its own deploy step is worse than one that fails.
-      - id: check
-        name: Confirm the required secrets exist
+      - name: Confirm the required secrets exist
         env:
           CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -48,20 +53,9 @@ jobs:
           [ -n "$CF_ACCOUNT" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
           if [ -n "$missing" ]; then
             echo "::error::missing repository secret(s):$missing -- see DEPLOYMENT.md"
-            echo "have_cloudflare=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          echo "have_cloudflare=true" >> "$GITHUB_OUTPUT"
           echo "required secrets are present"
-
-      - name: Require the CI gate on this commit
-        uses: lewagon/wait-on-check-action@v1.3.4
-        with:
-          ref: ${{ github.sha }}
-          check-name: all gates passed
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 20
-          allowed-conclusions: success
 
   build:
     name: build the artifact in CI
@@ -73,7 +67,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build from source
+      - name: Build from the pinned sources
         run: python3 build.py --write
 
       - name: Fail if the committed page was not what the sources produce
