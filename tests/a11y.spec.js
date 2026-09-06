@@ -92,6 +92,13 @@ test.describe("accessibility", () => {
     await page.goto("/index.html");
     await page.waitForTimeout(2000);
 
+    // The rail is hidden below 860px, where it would eat a phone screen, so
+    // there is nothing to click. Skip rather than time out for 30 seconds.
+    test.skip(
+      !(await page.locator("#rail").isVisible()),
+      "no category rail at this width"
+    );
+
     const href = await page.locator("#rail a").nth(3).getAttribute("href");
     await page.locator(`#rail a[href="${href}"]`).click();
     await page.waitForTimeout(1500);

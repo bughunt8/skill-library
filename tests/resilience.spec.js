@@ -61,15 +61,36 @@ test.describe("no horizontal overflow at any width", () => {
   }
 });
 
+/*
+ * These build their contexts explicitly rather than using describe-level
+ * `test.use({ reducedMotion })`. The overflow sweep above proves context-level
+ * emulation works, while the describe-level form was not taking effect here: the
+ * page came back with 23 pin-spacers and an enhanced document, which is the
+ * no-preference path. An emulation option that silently does not apply turns
+ * these into tests that pass for the wrong reason, so the mechanism that
+ * demonstrably works is used instead.
+ */
 test.describe("prefers-reduced-motion", () => {
-  test.use({ reducedMotion: "reduce" });
-
-  test("becomes a static, complete, readable list", async ({ page }) => {
+  const openReduced = async (browser) => {
+    const ctx = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      reducedMotion: "reduce"
+    });
+    const page = await ctx.newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
-
     await page.goto("/index.html");
-    await page.waitForTimeout(1600);
+    await page.waitForTimeout(1800);
+    // Confirm the emulation actually applied before asserting anything on it.
+    const applied = await page.evaluate(
+      () => window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
+    expect(applied, "reduced-motion emulation must be in effect").toBe(true);
+    return { ctx, page, errors };
+  };
+
+  test("becomes a static, complete, readable list", async ({ browser }) => {
+    const { ctx, page, errors } = await openReduced(browser);
 
     // No pinning at all.
     expect(await page.locator(".pin-spacer").count()).toBe(0);
@@ -88,54 +109,65 @@ test.describe("prefers-reduced-motion", () => {
     expect(ghosts).toBe(0);
 
     expect(errors).toEqual([]);
+    await ctx.close();
   });
 
-  test("the counter is truthful instead of stuck at zero", async ({ page }) => {
-    await page.goto("/index.html");
-    await page.waitForTimeout(1200);
+  test("the counter is truthful instead of stuck at zero", async ({ browser }) => {
+    const { ctx, page } = await openReduced(browser);
     const n = await page.evaluate(
       () => Number(document.querySelector("#hudcount b")?.textContent ?? -1)
     );
     const total = await page.evaluate(() => window.SKILLDATA.total);
     expect(n).toBe(total);
+    await ctx.close();
   });
 });
 
-test.describe("mobile", () => {
-  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
-
-  test("swaps pinning for native swipe", async ({ page }) => {
+test.describe("narrow viewports", () => {
+  test("swap pinning for a native scroll-snap carousel", async ({ browser }) => {
+    const ctx = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true
+    });
+    const page = await ctx.newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
 
     await page.goto("/index.html");
-    await page.waitForTimeout(1600);
+    await page.waitForTimeout(1800);
 
-    // Pinning a horizontal strip inside a touch-scrolled page fights the user,
+    // Pinning a horizontal strip inside a touch-scrolled page fights the reader,
     // so the strip becomes a native scroll-snap carousel instead.
     expect(await page.locator(".pin-spacer").count()).toBe(0);
+
+    // What makes it swipeable: a horizontal scroll container whose content
+    // overflows it, with snap points. Asserting that assigning scrollLeft moves
+    // it is a test of the browser's scroll-snap implementation, not of our CSS,
+    // and snapping legitimately rejects an arbitrary offset.
     const strip = await page.evaluate(() => {
-      const s = document.querySelector(".strip");
+      const s = document.querySelector(".chapter .strip");
       const cs = getComputedStyle(s);
-      return { overflowX: cs.overflowX, snap: cs.scrollSnapType };
+      return {
+        overflowX: cs.overflowX,
+        snap: cs.scrollSnapType,
+        scrollable: s.scrollWidth - s.clientWidth,
+        cards: s.querySelectorAll(".card").length,
+        snapAligned: [...s.querySelectorAll(".card")].every(
+          (c) => getComputedStyle(c).scrollSnapAlign !== "none"
+        )
+      };
     });
     expect(["auto", "scroll"]).toContain(strip.overflowX);
     expect(strip.snap).toMatch(/x/);
+    expect(strip.scrollable, "content must overflow to be swipeable").toBeGreaterThan(0);
+    expect(strip.snapAligned, "cards must define snap points").toBe(true);
 
     // The fixed rail would eat the screen on a phone.
     await expect(page.locator("#rail")).toBeHidden();
 
-    // A card can actually be swiped to.
-    const moved = await page.evaluate(async () => {
-      const s = document.querySelector(".strip");
-      const before = s.scrollLeft;
-      s.scrollLeft = before + 600;
-      await new Promise((r) => setTimeout(r, 250));
-      return s.scrollLeft > before;
-    });
-    expect(moved).toBe(true);
-
     expect(errors).toEqual([]);
+    await ctx.close();
   });
 });
 
