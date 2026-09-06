@@ -1,0 +1,133 @@
+name: DNS for skills.ronald.ng
+
+# DNS for ronald.ng is on AWS Route 53, despite Cloudflare hosting the Pages
+# project. This workflow manages the single CNAME that points the subdomain at
+# Cloudflare, so the record is version-controlled and applied by Actions rather
+# than clicked into a console.
+#
+# Credentials: none stored. It assumes an IAM role by OIDC, so there is no AWS
+# access key anywhere in this repository or in its secrets. The role should be
+# scoped to ChangeResourceRecordSets on this one hosted zone.
+#
+# Manual only. It edits a live business domain, so it never runs on a push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        required: true
+        default: plan
+        type: choice
+        options: [plan, apply]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: dns-ronald-ng
+  cancel-in-progress: false
+
+jobs:
+  dns:
+    name: ${{ inputs.action }} the skills.ronald.ng CNAME
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.action == 'apply' && 'production-dns' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the current state before touching anything
+        run: |
+          echo "nameservers for ronald.ng:"
+          dig +short NS ronald.ng | sed 's/^/  /'
+          echo
+          echo "records that must not change:"
+          for n in ronald.ng www.ronald.ng resume.ronald.ng mcp.ronald.ng; do
+            printf '  %-20s %s\n' "$n" "$(dig +short "$n" | tr '\n' ' ')"
+          done
+          echo
+          echo "target record:"
+          printf '  %-20s %s\n' skills.ronald.ng \
+            "$(dig +short CNAME skills.ronald.ng || echo '<does not exist>')"
+
+      - name: Confirm the required configuration exists
+        env:
+          ROLE: ${{ secrets.AWS_ROLE_ARN }}
+          ZONE: ${{ secrets.AWS_HOSTED_ZONE_ID }}
+        run: |
+          missing=""
+          [ -n "$ROLE" ] || missing="$missing AWS_ROLE_ARN"
+          [ -n "$ZONE" ] || missing="$missing AWS_HOSTED_ZONE_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::missing repository secret(s):$missing -- see DEPLOYMENT.md"
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: gha-dns-skills-ronald-ng
+
+      - name: Build the change batch
+        env:
+          PROJECT: ${{ vars.CLOUDFLARE_PROJECT_NAME || 'skill-library' }}
+        run: |
+          cat > /tmp/change.json <<JSON
+          {
+            "Comment": "skills.ronald.ng -> Cloudflare Pages (managed by GitHub Actions)",
+            "Changes": [{
+              "Action": "UPSERT",
+              "ResourceRecordSet": {
+                "Name": "skills.ronald.ng",
+                "Type": "CNAME",
+                "TTL": 300,
+                "ResourceRecords": [{ "Value": "${PROJECT}.pages.dev" }]
+              }
+            }]
+          }
+          JSON
+          cat /tmp/change.json
+
+      # Refuse to touch anything other than the one subdomain we intend to.
+      - name: Guard against editing a live record
+        run: |
+          names=$(python3 -c "import json;print('\n'.join(c['ResourceRecordSet']['Name'] for c in json.load(open('/tmp/change.json'))['Changes']))")
+          echo "$names"
+          for n in $names; do
+            case "$n" in
+              skills.ronald.ng) ;;
+              *) echo "::error::refusing to modify $n; this workflow only manages skills.ronald.ng"; exit 1 ;;
+            esac
+          done
+          echo "change batch touches only skills.ronald.ng"
+
+      - name: Plan
+        if: inputs.action == 'plan'
+        run: |
+          echo "Would apply the change batch above to hosted zone (id held in secrets)."
+          echo "Re-run this workflow with action=apply to execute it."
+
+      - name: Apply
+        if: inputs.action == 'apply'
+        run: |
+          id=$(aws route53 change-resource-record-sets \
+                 --hosted-zone-id "${{ secrets.AWS_HOSTED_ZONE_ID }}" \
+                 --change-batch file:///tmp/change.json \
+                 --query 'ChangeInfo.Id' --output text)
+          echo "submitted $id, waiting for INSYNC"
+          aws route53 wait resource-record-sets-changed --id "$id"
+          echo "propagated"
+
+      - name: Verify resolution
+        if: inputs.action == 'apply'
+        run: |
+          for i in 1 2 3 4 5 6; do
+            got=$(dig +short CNAME skills.ronald.ng @1.1.1.1 | head -1)
+            echo "attempt $i: ${got:-<none>}"
+            [ -n "$got" ] && break
+            sleep 15
+          done
+          [ -n "$got" ] || { echo "::error::skills.ronald.ng still does not resolve"; exit 1; }
+          echo "skills.ronald.ng -> $got"

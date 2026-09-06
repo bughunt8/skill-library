@@ -1,0 +1,19 @@
+{
+  "name": "skill-library",
+  "private": true,
+  "type": "module",
+  "description": "Scroll-driven browser for a library of AI agent skills. Zero runtime dependencies; the packages below are test-and-lint only.",
+  "scripts": {
+    "build": "python3 build.py --write",
+    "build:check": "python3 build.py --check",
+    "test": "playwright test",
+    "lint:html": "html-validate index.html",
+    "lint:secrets": "node scripts/check-secrets.mjs",
+    "serve": "python3 -m http.server 8090"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.10.1",
+    "@playwright/test": "1.55.0",
+    "html-validate": "9.5.3"
+  }
+}

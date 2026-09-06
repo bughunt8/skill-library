@@ -1,0 +1,7 @@
+# Every change needs the owner's review. The deploy and DNS paths especially:
+# they touch a live business domain.
+*                           @bughunt8
+/.github/workflows/         @bughunt8
+/scripts/                   @bughunt8
+/build.py                   @bughunt8
+/DEPLOYMENT.md              @bughunt8

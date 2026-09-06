@@ -1,0 +1,13 @@
+node_modules/
+playwright-report/
+test-results/
+blob-report/
+.playwright/
+BUILD-INFO.txt
+robots.txt
+sitemap.xml
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+*.log

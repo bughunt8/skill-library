@@ -1,0 +1,91 @@
+name: Refresh from upstream sources
+
+# The library indexes three repositories that keep changing. This rebuilds the
+# page from them on a schedule and opens a pull request when the result differs,
+# so new skills appear without anyone remembering to look.
+#
+# Cadence note: this runs on the 1st and 15th, not on an even-ISO-week gate. An
+# even-week gate looks like a fortnight but silently produces a 21-day gap
+# whenever a year contains 53 ISO weeks. Day-of-month caps the gap at 16 days.
+#
+# Credentials: none beyond the automatic GITHUB_TOKEN, which is scoped to this
+# repository and cannot deploy anything. The PR still has to pass CI and be
+# reviewed like any other change.
+
+on:
+  schedule:
+    - cron: "0 6 1,15 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: refresh-sources
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: rebuild from upstream and open a PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # --refresh clones each source in sources.json at its current tip rather
+      # than reusing anything cached, so the rebuild reflects upstream today.
+      - name: Rebuild from the upstream repositories
+        id: rebuild
+        run: |
+          python3 build.py --refresh --write | tee /tmp/build.log
+          if git diff --quiet -- index.html data.js; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "no upstream changes"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff --stat -- index.html data.js
+          fi
+
+      - name: Record what moved
+        if: steps.rebuild.outputs.changed == 'true'
+        run: |
+          {
+            echo "Rebuilt from the upstream repositories listed in \`sources.json\`."
+            echo
+            echo '```'
+            cat /tmp/build.log
+            echo '```'
+            echo
+            echo "### Skills added"
+            git diff -- index.html | grep -oP '(?<=^\+ +<h3>)[^<]+' | sed 's/^/- /' | sort -u || echo "- none"
+            echo
+            echo "### Skills removed"
+            git diff -- index.html | grep -oP '(?<=^- +<h3>)[^<]+' | sed 's/^/- /' | sort -u || echo "- none"
+            echo
+            echo "Counts, attribution and licences are regenerated from the source trees, so"
+            echo "the figures on the page cannot drift from what is actually in them."
+            echo
+            echo "CI must pass before this merges: build reproducibility, HTML validity,"
+            echo "secret scan, and the browser suite."
+          } > /tmp/pr-body.md
+          cat /tmp/pr-body.md
+
+      - name: Open or update the pull request
+        if: steps.rebuild.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: automation/refresh-sources
+          base: main
+          commit-message: "chore: refresh skill index from upstream sources"
+          title: "chore: refresh skill index from upstream sources"
+          body-path: /tmp/pr-body.md
+          labels: automation, dependencies
+          delete-branch: true
+          add-paths: |
+            index.html
+            data.js

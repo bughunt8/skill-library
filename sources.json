@@ -1,0 +1,31 @@
+{
+  "$comment": "Upstream repositories this page indexes. build.py walks each for SKILL.md files, dedupes by skill name (shallowest path wins, so a repo that mirrors a skill into two directories contributes it once), and prerenders a card for each. Adding a source here is the only change needed to include it.",
+  "sources": [
+    {
+      "id": "bughunt8-skills",
+      "repo": "bughunt8/skills",
+      "url": "https://github.com/bughunt8/skills",
+      "subpath": "skills",
+      "license": "MIT + per-import",
+      "note": "Own library. Vendored imports keep their upstream licences; see its THIRD_PARTY_NOTICES.md."
+    },
+    {
+      "id": "creative-writing-skills",
+      "repo": "haowjy/creative-writing-skills",
+      "url": "https://github.com/haowjy/creative-writing-skills",
+      "subpath": null,
+      "flat_category": "creative-writing",
+      "license": "Apache-2.0",
+      "note": "Mirrors its skills into both cw/skills and skills; dedupe collapses them."
+    },
+    {
+      "id": "shuohao-skills",
+      "repo": "eternityspring/shuohao-skills",
+      "url": "https://github.com/eternityspring/shuohao-skills",
+      "subpath": "skills",
+      "flat_category": "shuohao",
+      "license": "Apache-2.0",
+      "note": "AI short-drama production pipeline."
+    }
+  ]
+}

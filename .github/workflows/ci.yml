@@ -1,0 +1,143 @@
+name: CI
+
+# Every gate that decides whether this site is fit to publish lives here and runs
+# in Actions. Nothing is validated, built or deployed by hand.
+#
+# No credentials are used by this workflow at all. It is read-only against the
+# repository and needs no secrets, so a fork PR runs the full suite.
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main, staging]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Our own rule: nothing credential-shaped may enter the tree. This deploys
+      # to Cloudflare and reads Route 53, so it is exactly the repo where a token
+      # gets pasted "just to test it".
+      - name: Scan the tree for credential-shaped material
+        run: node scripts/check-secrets.mjs
+
+      - name: Scan full history with gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: build is reproducible from source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # index.html is generated from the repositories in sources.json. If the
+      # committed page disagrees with the sources, the counts on screen are a
+      # claim nobody checked, so the build fails rather than shipping it.
+      - name: Verify index.html matches the sources
+        run: python3 build.py --check
+
+      - name: Confirm the gate can actually fail
+        run: |
+          # Guard against --check passing vacuously. Plant a card that is not in
+          # any source repo, prove --check rejects it, restore, prove it passes.
+          cp index.html /tmp/index.orig
+          sed -i 's#</main>#<article class="card"><h3>planted-defect</h3></article></main>#' index.html
+          if python3 build.py --check; then
+            echo "::error::build.py --check passed on a corrupted index.html; the gate is vacuous"
+            cp /tmp/index.orig index.html
+            exit 1
+          fi
+          echo "gate confirmed: --check rejects a page that disagrees with the sources"
+          cp /tmp/index.orig index.html
+          python3 build.py --check
+
+  lint:
+    name: html validity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint:html
+
+  test:
+    name: browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install browsers
+        run: npx playwright install --with-deps chromium
+
+      # Content, motion, resilience and accessibility. The suite asserts the
+      # page renders with JavaScript disabled, degrades to a complete list under
+      # prefers-reduced-motion, survives the motion CDN being unreachable, and
+      # has no horizontal overflow at any of eight widths in both motion modes.
+      - name: Run the suite
+        run: npm test
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14
+
+  # Single required status check, so branch protection has one stable name to
+  # depend on even as the jobs above change.
+  gate:
+    name: all gates passed
+    runs-on: ubuntu-latest
+    needs: [secrets, build, lint, test]
+    if: always()
+    steps:
+      - name: Fail if any gate failed
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "upstream results: $results"
+          for r in $results; do
+            if [ "$r" != "success" ]; then
+              echo "::error::a required gate did not pass ($results)"
+              exit 1
+            fi
+          done
+          echo "all gates passed"

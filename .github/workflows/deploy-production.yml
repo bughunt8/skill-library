@@ -1,0 +1,183 @@
+name: Deploy production
+
+# Production is skills.ronald.ng, served by Cloudflare Pages.
+#
+# Credentials: none in the tree. The Cloudflare token and account id come from
+# repository secrets at run time, and the DNS check uses AWS OIDC role assumption
+# rather than a stored access key. See DEPLOYMENT.md for the exact set.
+#
+# Deliberately not automatic on push. Production ships on a tag or a manual run,
+# through a protected environment, after CI has passed on that commit.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you shipping to production?"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    outputs:
+      have_cloudflare: ${{ steps.check.outputs.have_cloudflare }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail loudly and early on a missing secret. A deploy job that silently
+      # skips its own deploy step is worse than one that fails.
+      - id: check
+        name: Confirm the required secrets exist
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=""
+          [ -n "$CF_TOKEN" ]   || missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -n "$CF_ACCOUNT" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::missing repository secret(s):$missing -- see DEPLOYMENT.md"
+            echo "have_cloudflare=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "have_cloudflare=true" >> "$GITHUB_OUTPUT"
+          echo "required secrets are present"
+
+      - name: Require the CI gate on this commit
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: all gates passed
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 20
+          allowed-conclusions: success
+
+  build:
+    name: build the artifact in CI
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build from source
+        run: python3 build.py --write
+
+      - name: Fail if the committed page was not what the sources produce
+        run: |
+          if ! git diff --quiet -- index.html data.js; then
+            echo "::error::index.html or data.js differs from a clean build of the sources."
+            git --no-pager diff --stat -- index.html data.js
+            exit 1
+          fi
+
+      - name: Stamp the build and allow indexing
+        run: |
+          printf '%s\n' \
+            "production" \
+            "commit: ${GITHUB_SHA}" \
+            "ref: ${GITHUB_REF}" \
+            "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)" > BUILD-INFO.txt
+          printf 'User-agent: *\nAllow: /\nSitemap: https://skills.ronald.ng/sitemap.xml\n' > robots.txt
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' \
+            '  <url><loc>https://skills.ronald.ng/</loc>' \
+            "    <lastmod>$(date -u +%Y-%m-%d)</lastmod>" \
+            '    <changefreq>weekly</changefreq></url>' \
+            '</urlset>' > sitemap.xml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: |
+            index.html
+            styles.css
+            app.js
+            data.js
+            robots.txt
+            sitemap.xml
+            BUILD-INFO.txt
+            _headers
+          retention-days: 30
+
+  deploy:
+    name: publish to Cloudflare Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://skills.ronald.ng
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: site
+
+      # The token is passed by reference from the repository secret. It is never
+      # written to the tree, echoed, or persisted in the artifact.
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            pages deploy site
+            --project-name=${{ vars.CLOUDFLARE_PROJECT_NAME || 'skill-library' }}
+            --branch=main
+            --commit-dirty=true
+
+  verify:
+    name: verify production is live and correct
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      # DNS for ronald.ng is on AWS Route 53, not Cloudflare, so the custom
+      # domain resolves through a CNAME managed there. Confirm it points at the
+      # Pages project before declaring the deploy good.
+      - name: Confirm the custom domain resolves
+        run: |
+          set -o pipefail
+          target=$(dig +short CNAME skills.ronald.ng | head -1)
+          echo "skills.ronald.ng CNAME -> ${target:-<none>}"
+          if [ -z "$target" ]; then
+            echo "::warning::skills.ronald.ng has no CNAME yet; verifying the pages.dev origin instead"
+            echo "SMOKE_URL=https://${{ vars.CLOUDFLARE_PROJECT_NAME || 'skill-library' }}.pages.dev" >> "$GITHUB_ENV"
+          else
+            echo "SMOKE_URL=https://skills.ronald.ng" >> "$GITHUB_ENV"
+          fi
+
+      - name: Smoke-test the live site
+        run: node scripts/smoke.mjs "$SMOKE_URL" "$GITHUB_SHA"
+
+      - name: Confirm TLS and security headers
+        if: env.SMOKE_URL == 'https://skills.ronald.ng'
+        run: |
+          h=$(curl -sSI https://skills.ronald.ng)
+          echo "$h"
+          for header in strict-transport-security x-content-type-options referrer-policy; do
+            echo "$h" | grep -qi "^$header:" || {
+              echo "::error::missing response header: $header (set it in _headers)"; exit 1; }
+          done
+          echo "security headers present"
